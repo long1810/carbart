@@ -1,0 +1,35 @@
+1.Cách train Bước 1
+    python train_classifier.py --data_dir dataset_cabbage --output_dir runs/cabbage --model_name mobilenetv2 --epochs 15
+
+    Kết quả mong muốn:
+    class names: ['cabbage', 'non_cabbage']
+
+2.Cách train Bước 2
+    Train phát hiện có sâu hay không bằng MobileNetV2
+    python train_classifier.py --data_dir dataset_pest --output_dir runs/pest_mobilenet --model_name mobilenetv2 --epochs 15
+    Hoặc dùng ResNet18
+    python train_classifier.py --data_dir dataset_pest --output_dir runs/pest_resnet18 --model_name resnet18 --epochs 15
+
+
+6. File suy luận ảnh đơn
+File này dùng cho:
+Bước 1: ảnh có phải bắp cải không
+Bước 2: ảnh có sâu không
+
+7.Chạy bước 1 và bước 2 theo pipeline
+
+8. Bước 2 nâng cao: chia ảnh thành patch, quét từng vùng, tô khung
+Ý tưởng:
+đọc ảnh
+chia ảnh thành nhiều ô nhỏ
+mỗi ô được đưa qua model pest/no_pest
+nếu xác suất pest lớn hơn ngưỡng, vẽ khung đỏ
+cuối cùng gộp kết quả
+patch_inference.py
+
+9. Cách chạy phần nâng cao
+python patch_inference.py --model_path runs/pest_mobilenet/best_model.pth --image_path test.jpg --output_path result.jpg --patch_size 128 --stride 64 --threshold 0.8
+
+10. Phiên bản webcam thời gian thực
+Nếu bạn muốn đưa lên robot hoặc camera USB, dùng bản này.
+webcam_pipeline.py

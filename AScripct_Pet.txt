@@ -1,0 +1,33 @@
+Bước 1: Nhận diện cây bắp cải 
+	• dùng MobileNetV2 
+	• output: cabbage, non_cabbage Bước 2: Phát hiện có sâu 
+	• dùng MobileNetV2 / ResNet18 
+	• output: pest, no_pest 
+Bước 2 nâng cao Sau khi xong bản đầu, nâng cấp bằng: 
+	• chia ảnh thành nhiều vùng nhỏ 
+	• kiểm tra từng vùng bằng CNN 
+	• tô khung vùng nghi có sâu
+	
+1. Cấu trúc thư mục dữ liệu
+Bước 1: nhận diện bắp cải
+	dataset_cabbage/
+	├── train/
+	│   ├── cabbage/
+	│   └── non_cabbage/
+	├── val/
+	│   ├── cabbage/
+	│   └── non_cabbage/
+	└── test/
+		├── cabbage/
+		└── non_cabbage/
+Bước 2: phát hiện có sâu hay không
+	dataset_pest/
+	├── train/
+	│   ├── pest/
+	│   └── no_pest/
+	├── val/
+	│   ├── pest/
+	│   └── no_pest/
+	└── test/
+		├── pest/
+		└── no_pest/
