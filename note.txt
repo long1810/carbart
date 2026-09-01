@@ -1,35 +1,427 @@
-1.Cách train Bước 1
-    python train_classifier.py --data_dir dataset_cabbage --output_dir runs/cabbage --model_name mobilenetv2 --epochs 15
-
-    Kết quả mong muốn:
-    class names: ['cabbage', 'non_cabbage']
-
-2.Cách train Bước 2
-    Train phát hiện có sâu hay không bằng MobileNetV2
-    python train_classifier.py --data_dir dataset_pest --output_dir runs/pest_mobilenet --model_name mobilenetv2 --epochs 15
-    Hoặc dùng ResNet18
-    python train_classifier.py --data_dir dataset_pest --output_dir runs/pest_resnet18 --model_name resnet18 --epochs 15
 
 
-6. File suy luận ảnh đơn
-File này dùng cho:
-Bước 1: ảnh có phải bắp cải không
-Bước 2: ảnh có sâu không
+Bước 1: Nhận diện cây bắp cải 
+	• dùng MobileNetV2 
+	• output: cabbage, non_cabbage 
+Bước 2: Phát hiện có sâu 
+	• dùng MobileNetV2 / ResNet18 
+	• output: pest, no_pest 
+Bước 3 nâng cao Sau khi xong bản đầu, nâng cấp bằng: 
+	• chia ảnh thành nhiều vùng nhỏ 
+	• kiểm tra từng vùng bằng CNN 
+	• tô khung vùng nghi có sâu
+	
+Bước 4 nhận điện vùng sâu 
 
-7.Chạy bước 1 và bước 2 theo pipeline
+## 1. Chuẩn bị dữ liệu annotation
 
-8. Bước 2 nâng cao: chia ảnh thành patch, quét từng vùng, tô khung
-Ý tưởng:
-đọc ảnh
-chia ảnh thành nhiều ô nhỏ
-mỗi ô được đưa qua model pest/no_pest
-nếu xác suất pest lớn hơn ngưỡng, vẽ khung đỏ
-cuối cùng gộp kết quả
-patch_inference.py
+Dữ liệu ban đầu gồm ảnh và file annotation Pascal VOC XML:
 
-9. Cách chạy phần nâng cao
-python patch_inference.py --model_path runs/pest_mobilenet/best_model.pth --image_path test.jpg --output_path result.jpg --patch_size 128 --stride 64 --threshold 0.8
+```text
+dataset_pest_detect/
+├── images/
+│   ├── Ampelophaga/
+│   ├── army worm/
+│   ├── beet army worm/
+│   ├── cabbage army worm/
+│   └── Cabbage_test/
+└── annotations/
+    ├── Ampelophaga/
+    ├── army worm/
+    ├── beet army worm/
+    ├── cabbage army worm/
+    └── Cabbage_test/
+```
 
-10. Phiên bản webcam thời gian thực
-Nếu bạn muốn đưa lên robot hoặc camera USB, dùng bản này.
-webcam_pipeline.py
+Mỗi ảnh có một file XML tương ứng chứa thông tin class và bounding box của sâu.
+
+Ví dụ annotation Pascal VOC:
+
+```xml
+<object>
+    <name>Ampelophaga</name>
+    <bndbox>
+        <xmin>112</xmin>
+        <ymin>43</ymin>
+        <xmax>137</xmax>
+        <ymax>176</ymax>
+    </bndbox>
+</object>
+```
+
+Ý nghĩa:
+
+```text
+name: tên loại sâu
+xmin, ymin: tọa độ góc trên bên trái của bounding box
+xmax, ymax: tọa độ góc dưới bên phải của bounding box
+```
+
+---
+
+## 2. Chuyển dữ liệu Pascal VOC sang định dạng train
+
+Trước khi train, hệ thống chuyển dữ liệu XML sang định dạng TXT đơn giản để mô hình dễ đọc hơn.
+
+Chạy file:
+
+```powershell
+python prepare_voc_dataset.py
+```
+
+Sau khi chạy, chương trình tạo ra thư mục mới:
+
+```text
+dataset_pest_bbox/
+├── images/
+│   ├── train/
+│   ├── val/
+│   └── test/
+├── annotations/
+│   ├── train/
+│   ├── val/
+│   └── test/
+└── classes.txt
+```
+
+File annotation sau khi chuyển có dạng:
+
+```text
+class_id xmin ymin xmax ymax
+```
+
+Ví dụ:
+
+```text
+0 112 43 137 176
+```
+
+Trong đó:
+
+```text
+0 = Ampelophaga
+1 = army worm
+2 = beet army worm
+3 = cabbage army worm
+```
+
+File `classes.txt` chứa danh sách class:
+
+```text
+Ampelophaga
+army worm
+beet army worm
+cabbage army worm
+```
+
+---
+
+## 3. Train mô hình phát hiện sâu bằng MobileNetV2 và Bounding Box Regression
+
+Sau khi chuẩn bị dữ liệu, hệ thống train mô hình phát hiện sâu bằng file:
+
+```powershell
+python train_bbox_detector.py
+```
+
+Mô hình sử dụng MobileNetV2 làm backbone để trích xuất đặc trưng ảnh. Sau đó, mô hình có hai nhánh đầu ra:
+
+```text
+class_output: dự đoán loại sâu
+box_output: dự đoán vị trí bounding box
+```
+
+Kiến trúc tổng quát:
+
+```text
+Ảnh đầu vào
+→ MobileNetV2 Backbone
+→ Global Average Pooling
+→ Dropout
+→ Nhánh phân loại class
+→ Nhánh dự đoán bounding box
+```
+
+Trong đó:
+
+```text
+class_output = [p1, p2, p3, p4]
+box_output = [x_min, y_min, x_max, y_max]
+```
+
+Các giá trị bounding box được chuẩn hóa trong khoảng từ 0 đến 1. Khi hiển thị lên ảnh gốc, hệ thống nhân các giá trị này với chiều rộng và chiều cao thật của ảnh.
+
+Kết quả sau khi train được lưu tại:
+
+```text
+runs/pest_bbox_mobilenet/
+├── best_model.keras
+├── final_model.keras
+└── classes.txt
+```
+
+Trong đó:
+
+```text
+best_model.keras: mô hình tốt nhất theo val_loss
+final_model.keras: mô hình cuối cùng sau khi train
+classes.txt: danh sách class
+```
+
+---
+
+## 4. Hàm loss trong quá trình train
+
+Do mô hình có hai đầu ra nên sử dụng hai hàm loss khác nhau.
+
+Nhánh phân loại sử dụng:
+
+```text
+Categorical Crossentropy
+```
+
+Nhánh bounding box sử dụng:
+
+```text
+Mean Squared Error
+```
+
+Tổng loss của mô hình:
+
+```text
+Loss_total = Loss_class + α * Loss_box
+```
+
+Trong chương trình, hệ số `α` được đặt lớn hơn 1 để tăng mức độ ưu tiên cho việc học vị trí bounding box.
+
+Ví dụ:
+
+```text
+Loss_total = 1.0 * Loss_class + 5.0 * Loss_box
+```
+
+---
+
+## 5. Suy luận trên một ảnh đơn
+
+Sau khi train xong, có thể kiểm tra mô hình trên một ảnh bằng file:
+
+```powershell
+python test_image_refine_contour.py
+```
+
+File này thực hiện các bước:
+
+```text
+Đọc ảnh đầu vào
+→ Resize ảnh về 224x224
+→ Load mô hình best_model.keras
+→ Dự đoán class và bounding box
+→ Chuyển box từ tọa độ chuẩn hóa về tọa độ pixel
+→ Tinh chỉnh vùng sâu bằng GrabCut
+→ Tìm contour vùng sâu
+→ Vẽ kết quả lên ảnh
+→ Lưu ảnh output
+```
+
+Kết quả đầu ra gồm:
+
+```text
+Box đỏ: bounding box thô do mô hình dự đoán
+Box xanh: bounding box sau khi tinh chỉnh
+Đường vàng: contour vùng nghi là sâu
+Tên class và độ tin cậy
+```
+
+Ảnh kết quả được lưu tại:
+
+```text
+result_refined_pest.jpg
+```
+
+---
+
+## 6. Tinh chỉnh vùng sâu bằng GrabCut và Contour
+
+Do mô hình MobileNetV2 + Dense chỉ dự đoán một bounding box từ toàn ảnh nên box có thể bị lệch hoặc quá to. Để kết quả hiển thị tốt hơn, hệ thống sử dụng thêm thuật toán GrabCut của OpenCV.
+
+Quy trình tinh chỉnh:
+
+```text
+Bounding box thô từ mô hình
+→ Dùng box làm vùng khởi tạo cho GrabCut
+→ Tách foreground và background
+→ Tạo mask vùng vật thể
+→ Xử lý morphology để giảm nhiễu
+→ Tìm contour lớn nhất
+→ Vẽ contour và box tinh chỉnh
+```
+
+GrabCut giúp tách vùng sâu khỏi nền ảnh tốt hơn, đặc biệt trong trường hợp sâu có hình dạng dài hoặc cong. Sau đó, contour lớn nhất được chọn làm vùng nghi là sâu.
+
+---
+
+## 7. Quét toàn bộ thư mục ảnh test
+
+Để kiểm tra nhiều ảnh cùng lúc, sử dụng file:
+
+```powershell
+python test_folder_refine_contour.py
+```
+
+File này quét toàn bộ ảnh trong thư mục:
+
+```text
+C:\Users\LongDHc\Desktop\Graduation\dataset_pest_bbox\images\test
+```
+
+Với mỗi ảnh, chương trình thực hiện:
+
+```text
+Đọc ảnh
+→ Dự đoán class và bounding box
+→ Tinh chỉnh vùng sâu bằng GrabCut
+→ Vẽ box và contour
+→ Lưu ảnh kết quả
+```
+
+Kết quả được lưu trong thư mục:
+
+```text
+outputs_refined_test/
+```
+
+Ví dụ:
+
+```text
+outputs_refined_test/
+├── image_1_result.jpg
+├── image_2_result.jpg
+├── image_3_result.jpg
+└── ...
+```
+
+---
+
+## 8. Phiên bản phát hiện sâu trên video hoặc webcam
+
+Đối với video hoặc webcam, có thể sử dụng cùng mô hình đã train:
+
+```text
+runs/pest_bbox_mobilenet/best_model.keras
+```
+
+Quy trình xử lý video:
+
+```text
+Đọc từng frame từ video/webcam
+→ Resize frame
+→ Dự đoán class và bounding box
+→ Tinh chỉnh vùng sâu nếu cần
+→ Vẽ kết quả lên frame
+→ Hiển thị hoặc lưu video output
+```
+
+Để tăng tốc, hệ thống có thể áp dụng các kỹ thuật:
+
+```text
+Predict mỗi 3 đến 5 frame một lần
+Dùng lại box của frame trước cho các frame giữa
+Resize video xuống kích thước nhỏ hơn
+Giới hạn số thread CPU
+Làm mượt box qua nhiều frame
+```
+
+---
+
+## 9. So sánh với phương pháp chia patch
+
+Ban đầu có thể dùng cách chia ảnh thành nhiều patch nhỏ rồi đưa từng patch qua mô hình phân loại pest/non_pest. Cách này có ý tưởng:
+
+```text
+Đọc ảnh
+→ Chia ảnh thành nhiều ô nhỏ
+→ Đưa từng ô qua model phân loại
+→ Nếu xác suất pest vượt ngưỡng thì vẽ khung
+→ Gộp các vùng phát hiện
+```
+
+Tuy nhiên, trong phiên bản hiện tại, hệ thống không sử dụng `patch_inference.py` nữa. Thay vào đó, hệ thống sử dụng mô hình học trực tiếp bounding box từ annotation. Cách này phù hợp hơn vì mô hình được học trực tiếp vị trí sâu thay vì phải quét từng vùng nhỏ.
+
+So sánh:
+
+```text
+Patch inference:
+- Không cần annotation bounding box
+- Chạy chậm do phải quét nhiều patch
+- Box thường không chính xác
+- Phù hợp chạy thử khi chỉ có model phân loại
+
+Bounding box regression:
+- Cần annotation bounding box
+- Dự đoán vị trí trực tiếp
+- Chạy nhanh hơn chia patch
+- Phù hợp hơn với bài toán phát hiện vị trí sâu
+```
+
+---
+
+## 10. Lệnh chạy tổng hợp
+
+Bước 1: Chuyển dữ liệu XML sang dataset train:
+
+```powershell
+python prepare_voc_dataset.py
+```
+
+Bước 2: Train mô hình MobileNetV2 phát hiện sâu và bounding box:
+
+```powershell
+python train_bbox_detector.py
+```
+
+Bước 3: Test một ảnh đơn:
+
+```powershell
+python test_image_refine_contour.py
+```
+
+Bước 4: Test toàn bộ thư mục ảnh:
+
+```powershell
+python test_folder_refine_contour.py
+```
+
+Kết quả model:
+
+```text
+runs/pest_bbox_mobilenet/best_model.keras
+```
+
+Kết quả ảnh test đơn:
+
+```text
+result_refined_pest.jpg
+```
+
+Kết quả quét thư mục:
+
+```text
+outputs_refined_test/
+```
+
+---
+
+## 11. Ghi chú về hạn chế
+
+Mô hình hiện tại không sử dụng YOLO mà sử dụng MobileNetV2 kết hợp hồi quy bounding box. Vì vậy, mô hình đơn giản hơn nhưng có một số hạn chế:
+
+```text
+Chỉ dự đoán tốt khi ảnh có một con sâu chính
+Box có thể lệch hoặc to nếu dữ liệu ít
+Không phù hợp tốt với ảnh có nhiều sâu cùng lúc
+Độ chính xác phụ thuộc nhiều vào chất lượng annotation
+GrabCut chỉ là bước hậu xử lý, không thay thế được mô hình detection chuyên dụng
+```
+
+Tuy nhiên, phương pháp này vẫn phù hợp với mục tiêu xây dựng một hệ thống phát hiện sâu đơn giản, dễ triển khai, không sử dụng YOLO, có khả năng dự đoán loại sâu và vị trí sâu trên ảnh.

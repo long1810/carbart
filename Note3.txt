@@ -1,0 +1,653 @@
+# QUY TRÌNH XÂY DỰNG HỆ THỐNG PHÁT HIỆN VÙNG SÂU TRÊN ẢNH
+
+## 1. Quy trình tổng quan của hệ thống
+
+Trong phiên bản ban đầu, hệ thống có thể được thiết kế theo nhiều bước nhỏ như nhận diện cây bắp cải, phát hiện ảnh có sâu hay không, sau đó chia ảnh thành nhiều vùng nhỏ để kiểm tra từng vùng. Tuy nhiên, trong phiên bản hiện tại, hệ thống được nâng cấp theo hướng học trực tiếp vị trí sâu thông qua dữ liệu annotation bounding box.
+
+Thay vì chỉ phân loại ảnh có sâu hay không, mô hình hiện tại thực hiện đồng thời hai nhiệm vụ:
+
+```text
+Dự đoán loại sâu xuất hiện trong ảnh
+Dự đoán vị trí vùng sâu bằng bounding box
+```
+
+Quy trình tổng thể của hệ thống:
+
+```text
+Chuẩn bị dữ liệu ảnh và annotation Pascal VOC XML
+→ Chuyển annotation XML sang định dạng TXT
+→ Chia dữ liệu thành train, validation, test
+→ Train mô hình MobileNetV2 kết hợp Bounding Box Regression
+→ Suy luận trên ảnh test
+→ Tinh chỉnh vùng sâu bằng GrabCut và contour
+→ Lưu ảnh kết quả
+```
+
+---
+
+## 2. Chuẩn bị dữ liệu annotation
+
+Dữ liệu ban đầu gồm ảnh và file annotation Pascal VOC XML. Cấu trúc dữ liệu như sau:
+
+```text
+dataset_pest_original/
+├── images/
+│   ├── Ampelophaga/
+│   ├── army worm/
+│   ├── beet army worm/
+│   ├── cabbage army worm/
+│   └── Cabbage_test/
+└── annotations/
+    ├── Ampelophaga/
+    ├── army worm/
+    ├── beet army worm/
+    ├── cabbage army worm/
+    └── Cabbage_test/
+```
+
+Trong đó:
+
+```text
+images: chứa ảnh đầu vào
+annotations: chứa file nhãn XML tương ứng với từng ảnh
+```
+
+Mỗi file XML chứa thông tin loại sâu và tọa độ bounding box bao quanh vùng sâu.
+
+Ví dụ annotation Pascal VOC:
+
+```xml
+<object>
+    <name>Ampelophaga</name>
+    <bndbox>
+        <xmin>112</xmin>
+        <ymin>43</ymin>
+        <xmax>137</xmax>
+        <ymax>176</ymax>
+    </bndbox>
+</object>
+```
+
+Ý nghĩa:
+
+```text
+name: tên loại sâu
+xmin, ymin: tọa độ góc trên bên trái của bounding box
+xmax, ymax: tọa độ góc dưới bên phải của bounding box
+```
+
+Trong dataset có 5 thư mục ảnh đầu vào:
+
+```text
+Ampelophaga
+army worm
+beet army worm
+cabbage army worm
+Cabbage_test
+```
+
+Tuy nhiên, `Cabbage_test` không được xem là một class riêng. Các ảnh trong thư mục này được ánh xạ về class:
+
+```text
+cabbage army worm
+```
+
+Danh sách class dùng để train gồm 4 class:
+
+```text
+0 = Ampelophaga
+1 = army worm
+2 = beet army worm
+3 = cabbage army worm
+```
+
+---
+
+## 3. Chuyển dữ liệu Pascal VOC XML sang định dạng train
+
+Trước khi train, hệ thống chuyển dữ liệu annotation từ Pascal VOC XML sang định dạng TXT đơn giản để dễ đọc trong quá trình huấn luyện.
+
+File sử dụng:
+
+```powershell
+python prepare_voc_dataset.py
+```
+
+Hoặc với phiên bản dùng thêm ảnh Edge:
+
+```powershell
+python prepare_voc_dataset_edges.py
+```
+
+Sau khi chạy, hệ thống tạo dataset mới:
+
+```text
+dataset_pest_bbox/
+├── images/
+│   ├── train/
+│   ├── val/
+│   └── test/
+├── annotations/
+│   ├── train/
+│   ├── val/
+│   └── test/
+└── classes.txt
+```
+
+Nếu dùng phiên bản ảnh gốc kết hợp Edge, dataset được tạo ra:
+
+```text
+dataset_pest_bbox_edges/
+├── images/
+│   ├── train/
+│   ├── val/
+│   └── test/
+├── edges/
+│   ├── train/
+│   ├── val/
+│   └── test/
+├── annotations/
+│   ├── train/
+│   ├── val/
+│   └── test/
+└── classes.txt
+```
+
+File annotation sau khi chuyển có dạng:
+
+```text
+class_id xmin ymin xmax ymax
+```
+
+Ví dụ:
+
+```text
+0 112 43 137 176
+```
+
+Trong đó:
+
+```text
+class_id: mã loại sâu
+xmin, ymin, xmax, ymax: tọa độ bounding box trên ảnh gốc
+```
+
+---
+
+## 4. Tạo ảnh Edge Detected từ ảnh gốc
+
+Ở phiên bản nâng cao, hệ thống sử dụng thêm ảnh biên cạnh, hay còn gọi là Edge Detected Image. Ảnh edge được tạo từ ảnh gốc bằng thuật toán Canny Edge Detection.
+
+Quy trình tạo ảnh edge:
+
+```text
+Ảnh gốc RGB
+→ Chuyển sang ảnh xám
+→ Làm mờ bằng Gaussian Blur
+→ Phát hiện biên bằng Canny
+→ Lưu ảnh edge
+```
+
+Code xử lý chính:
+
+```text
+gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+blur = cv2.GaussianBlur(gray, (5, 5), 0)
+edges = cv2.Canny(blur, CANNY_LOW, CANNY_HIGH)
+```
+
+Mục đích của ảnh edge là giúp mô hình học thêm thông tin về:
+
+```text
+đường biên thân sâu
+hình dạng dài hoặc cong của sâu
+ranh giới giữa sâu và nền lá
+```
+
+Tuy nhiên, ảnh edge chỉ là đặc trưng bổ sung. Nếu nền lá có nhiều gân hoặc chi tiết phức tạp, edge có thể tạo nhiều nhiễu. Vì vậy, kết quả cần được đánh giá thực nghiệm.
+
+---
+
+## 5. Train mô hình phát hiện sâu bằng MobileNetV2 và Bounding Box Regression
+
+Sau khi chuẩn bị dữ liệu, hệ thống train mô hình phát hiện sâu bằng MobileNetV2.
+
+Với phiên bản chỉ dùng ảnh gốc, chạy:
+
+```powershell
+python train_bbox_detector.py
+```
+
+Với phiên bản dùng ảnh gốc kết hợp Edge, chạy:
+
+```powershell
+python train_bbox_detector_edges.py
+```
+
+Mô hình có nhiệm vụ dự đoán đồng thời:
+
+```text
+class_output: loại sâu trong ảnh
+box_output: vị trí bounding box của sâu
+```
+
+Kiến trúc tổng quát phiên bản ảnh gốc:
+
+```text
+Ảnh gốc
+→ MobileNetV2 Backbone
+→ Trích xuất đặc trưng
+→ Nhánh phân loại class
+→ Nhánh dự đoán bounding box
+```
+
+Kiến trúc tổng quát phiên bản ảnh gốc kết hợp Edge:
+
+```text
+Ảnh gốc RGB → MobileNetV2 Backbone
+Ảnh Edge → CNN nhỏ trích xuất đặc trưng biên
+→ Ghép đặc trưng RGB và Edge
+→ Nhánh phân loại class
+→ Nhánh dự đoán bounding box
+```
+
+Đầu ra của mô hình:
+
+```text
+class_output = [p1, p2, p3, p4]
+box_output = [x_min, y_min, x_max, y_max]
+```
+
+Trong đó:
+
+```text
+class_output: xác suất của từng loại sâu
+box_output: tọa độ bounding box đã chuẩn hóa trong khoảng 0 đến 1
+```
+
+Khi hiển thị lên ảnh gốc, tọa độ box được chuyển lại về pixel:
+
+```text
+x1 = x_min × image_width
+y1 = y_min × image_height
+x2 = x_max × image_width
+y2 = y_max × image_height
+```
+
+Kết quả model phiên bản ảnh gốc được lưu tại:
+
+```text
+runs/pest_bbox_mobilenet/
+├── best_model.keras
+├── final_model.keras
+└── classes.txt
+```
+
+Kết quả model phiên bản ảnh gốc kết hợp Edge được lưu tại:
+
+```text
+runs/pest_bbox_mobilenet_edges/
+├── best_model.keras
+├── final_model.keras
+└── classes.txt
+```
+
+---
+
+## 6. Hàm loss trong quá trình train
+
+Do mô hình có hai đầu ra nên hệ thống sử dụng hai hàm loss khác nhau.
+
+Nhánh phân loại sử dụng:
+
+```text
+Categorical Crossentropy
+```
+
+Nhánh bounding box sử dụng:
+
+```text
+Mean Squared Error hoặc Huber Loss
+```
+
+Tổng loss của mô hình:
+
+```text
+Loss_total = Loss_class + α × Loss_box
+```
+
+Trong đó:
+
+```text
+Loss_class: sai số phân loại loại sâu
+Loss_box: sai số dự đoán bounding box
+α: hệ số tăng trọng số cho bài toán học vị trí
+```
+
+Ví dụ:
+
+```text
+Loss_total = 1.0 × Loss_class + 5.0 × Loss_box
+```
+
+Hoặc với phiên bản nâng cao:
+
+```text
+Loss_total = 1.0 × Loss_class + 10.0 × Loss_box
+```
+
+Việc tăng trọng số cho `Loss_box` giúp mô hình tập trung hơn vào nhiệm vụ học vị trí sâu trên ảnh.
+
+---
+
+## 7. Suy luận trên một ảnh đơn
+
+Sau khi train xong, có thể kiểm tra mô hình trên một ảnh đơn.
+
+Với phiên bản ảnh gốc:
+
+```powershell
+python test_image_refine_contour.py
+```
+
+Với phiên bản ảnh gốc kết hợp Edge:
+
+```powershell
+python test_image_refine_contour_edges.py
+```
+
+Quy trình suy luận:
+
+```text
+Đọc ảnh đầu vào
+→ Resize ảnh về 224x224
+→ Tạo ảnh Edge nếu dùng mô hình Edge
+→ Load mô hình best_model.keras
+→ Dự đoán class và bounding box
+→ Chuyển box từ tọa độ chuẩn hóa về tọa độ pixel
+→ Tinh chỉnh vùng sâu bằng GrabCut
+→ Tìm contour vùng sâu
+→ Vẽ kết quả lên ảnh
+→ Lưu ảnh output
+```
+
+Kết quả đầu ra gồm:
+
+```text
+Box đỏ: bounding box thô do mô hình dự đoán
+Box xanh: bounding box sau khi tinh chỉnh
+Đường vàng: contour vùng nghi là sâu
+Tên class và độ tin cậy
+```
+
+---
+
+## 8. Tinh chỉnh vùng sâu bằng GrabCut và Contour
+
+Do mô hình MobileNetV2 kết hợp Dense chỉ dự đoán một bounding box từ toàn ảnh, box có thể bị lệch hoặc quá lớn. Để cải thiện kết quả hiển thị, hệ thống sử dụng thêm thuật toán GrabCut của OpenCV.
+
+Quy trình tinh chỉnh:
+
+```text
+Bounding box thô từ mô hình
+→ Dùng box làm vùng khởi tạo cho GrabCut
+→ Tách foreground và background
+→ Tạo mask vùng vật thể
+→ Xử lý morphology để giảm nhiễu
+→ Tìm contour lớn nhất
+→ Vẽ contour và box tinh chỉnh
+```
+
+GrabCut giúp tách vùng nghi là sâu khỏi nền ảnh. Sau đó, hệ thống dùng contour để lấy đường viền vùng sâu.
+
+Kết quả sau tinh chỉnh:
+
+```text
+Box refine giúp xác định vùng sâu rõ hơn
+Contour giúp quan sát hình dạng sâu trực quan hơn
+```
+
+---
+
+## 9. Quét toàn bộ thư mục ảnh test
+
+Để kiểm tra nhiều ảnh cùng lúc, sử dụng file test thư mục.
+
+Với phiên bản ảnh gốc:
+
+```powershell
+python test_folder_refine_contour.py
+```
+
+Với phiên bản ảnh gốc kết hợp Edge:
+
+```powershell
+python test_folder_refine_contour_edges.py
+```
+
+File này quét toàn bộ ảnh trong thư mục:
+
+```text
+dataset_pest_bbox/images/test
+```
+
+Hoặc với phiên bản Edge:
+
+```text
+dataset_pest_bbox_edges/images/test
+```
+
+Với mỗi ảnh, chương trình thực hiện:
+
+```text
+Đọc ảnh
+→ Tạo ảnh Edge nếu cần
+→ Dự đoán class và bounding box
+→ Tinh chỉnh vùng sâu bằng GrabCut
+→ Vẽ box và contour
+→ Lưu ảnh kết quả
+```
+
+Kết quả được lưu trong thư mục:
+
+```text
+outputs_refined_test/
+```
+
+Hoặc:
+
+```text
+outputs_refined_test_edges/
+```
+
+Ở phiên bản Edge, hệ thống có thể lưu hai ảnh kết quả cho mỗi ảnh đầu vào:
+
+```text
+Ảnh full: ảnh gốc + box + contour
+Ảnh edge: ảnh edge + contour + box
+```
+
+Ví dụ:
+
+```text
+outputs_refined_test_edges/
+├── 001_image_01_full.jpg
+├── 001_image_02_edge.jpg
+├── 002_image_01_full.jpg
+├── 002_image_02_edge.jpg
+```
+
+Cách đặt tên này giúp ảnh gốc và ảnh edge của cùng một mẫu nằm gần nhau, thuận tiện cho việc quan sát và so sánh.
+
+---
+
+## 10. Phiên bản phát hiện sâu trên video hoặc webcam
+
+Đối với video hoặc webcam, có thể sử dụng mô hình đã train để xử lý từng frame.
+
+Quy trình xử lý video:
+
+```text
+Đọc từng frame từ video hoặc webcam
+→ Resize frame
+→ Tạo edge nếu dùng mô hình Edge
+→ Dự đoán class và bounding box
+→ Tinh chỉnh vùng sâu nếu cần
+→ Vẽ kết quả lên frame
+→ Hiển thị hoặc lưu video output
+```
+
+Để tăng tốc xử lý video, có thể áp dụng:
+
+```text
+Predict mỗi 3 đến 5 frame một lần
+Dùng lại box của frame trước cho các frame giữa
+Resize video xuống kích thước nhỏ hơn
+Giới hạn số thread CPU
+Làm mượt box qua nhiều frame
+```
+
+---
+
+## 11. So sánh với phương pháp chia patch
+
+Ở hướng tiếp cận ban đầu, có thể chia ảnh thành nhiều vùng nhỏ rồi đưa từng vùng vào mô hình CNN để kiểm tra có sâu hay không.
+
+Ý tưởng của phương pháp chia patch:
+
+```text
+Đọc ảnh
+→ Chia ảnh thành nhiều ô nhỏ
+→ Đưa từng ô qua model phân loại pest/no_pest
+→ Nếu xác suất pest vượt ngưỡng thì vẽ khung
+→ Gộp các vùng nghi có sâu
+```
+
+Tuy nhiên, trong phiên bản hiện tại, hệ thống không sử dụng `patch_inference.py` làm phương pháp chính nữa. Thay vào đó, hệ thống sử dụng annotation bounding box để train mô hình dự đoán trực tiếp vị trí sâu.
+
+So sánh:
+
+```text
+Patch inference:
+- Không cần annotation bounding box
+- Chạy chậm vì phải quét nhiều vùng
+- Box thường không chính xác
+- Phù hợp khi chỉ có model phân loại
+
+Bounding Box Regression:
+- Cần annotation bounding box
+- Dự đoán vị trí trực tiếp
+- Chạy nhanh hơn chia patch
+- Phù hợp hơn với bài toán phát hiện vùng sâu
+```
+
+Vì hệ thống hiện tại đã có dữ liệu annotation bounding box, phương pháp Bounding Box Regression được lựa chọn làm hướng chính.
+
+---
+
+## 12. Lệnh chạy tổng hợp
+
+### 12.1. Phiên bản ảnh gốc
+
+Bước 1: Chuyển dữ liệu XML sang dataset train:
+
+```powershell
+python prepare_voc_dataset.py
+```
+
+Bước 2: Train mô hình MobileNetV2 phát hiện sâu và bounding box:
+
+```powershell
+python train_bbox_detector.py
+```
+
+Bước 3: Test một ảnh đơn:
+
+```powershell
+python test_image_refine_contour.py
+```
+
+Bước 4: Test toàn bộ thư mục ảnh:
+
+```powershell
+python test_folder_refine_contour.py
+```
+
+Model sau train:
+
+```text
+runs/pest_bbox_mobilenet/best_model.keras
+```
+
+---
+
+### 12.2. Phiên bản ảnh gốc kết hợp Edge
+
+Bước 1: Tạo dataset ảnh gốc + ảnh Edge:
+
+```powershell
+python prepare_voc_dataset_edges.py
+```
+
+Bước 2: Train mô hình MobileNetV2 kết hợp Edge:
+
+```powershell
+python train_bbox_detector_edges.py
+```
+
+Bước 3: Test toàn bộ thư mục ảnh:
+
+```powershell
+python test_folder_refine_contour_edges.py
+```
+
+Model sau train:
+
+```text
+runs/pest_bbox_mobilenet_edges/best_model.keras
+```
+
+Kết quả ảnh test:
+
+```text
+outputs_refined_test_edges/
+```
+
+---
+
+## 13. Ghi chú về hạn chế
+
+Mô hình hiện tại không sử dụng YOLO mà sử dụng MobileNetV2 kết hợp hồi quy bounding box. Vì vậy, mô hình đơn giản hơn nhưng có một số hạn chế:
+
+```text
+Chỉ dự đoán tốt khi ảnh có một con sâu chính
+Box có thể lệch hoặc quá to nếu dữ liệu ít
+Không phù hợp tốt với ảnh có nhiều sâu cùng lúc
+Độ chính xác phụ thuộc vào chất lượng annotation
+Ảnh Edge có thể bị nhiễu nếu nền lá nhiều gân hoặc chi tiết phức tạp
+GrabCut chỉ là bước hậu xử lý, không thay thế được mô hình detection chuyên dụng
+```
+
+Tuy nhiên, phương pháp này vẫn phù hợp với mục tiêu của đồ án là xây dựng một hệ thống phát hiện sâu đơn giản, dễ triển khai, không sử dụng YOLO, có khả năng dự đoán loại sâu và vị trí sâu trên ảnh.
+
+---
+
+## 14. Kết luận phương pháp
+
+Phương pháp được sử dụng trong hệ thống là:
+
+```text
+Phát hiện vùng sâu trên ảnh bằng MobileNetV2 kết hợp Bounding Box Regression và tinh chỉnh vùng sâu bằng GrabCut/Contour.
+```
+
+Ở phiên bản nâng cao, hệ thống bổ sung thêm ảnh Edge Detected để cung cấp thông tin về đường biên và hình dạng vật thể:
+
+```text
+Ảnh gốc RGB + Ảnh Edge
+→ Mô hình học đặc trưng màu sắc, kết cấu và đường biên
+→ Dự đoán loại sâu và bounding box
+→ Tinh chỉnh vùng sâu bằng GrabCut
+→ Vẽ contour trực quan
+```
+
+Phương pháp này giúp hệ thống vừa nhận diện được loại sâu, vừa xác định được vùng sâu trên ảnh, đồng thời tạo kết quả trực quan phục vụ đánh giá và trình bày trong báo cáo.

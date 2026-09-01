@@ -20,6 +20,14 @@ Bước 1: nhận diện bắp cải
 	└── test/
 		├── cabbage/
 		└── non_cabbage/
+	data--cabbage\
+		--non_cabbage\
+			--Bean
+			--Bitter_Gourd
+			--Bottle_Gourd
+			--Broccoli
+			-...
+
 Bước 2: phát hiện có sâu hay không
 	dataset_pest/
 	├── train/
@@ -31,3 +39,34 @@ Bước 2: phát hiện có sâu hay không
 	└── test/
 		├── pest/
 		└── no_pest/
+
+
+
+
+
+
+Bước 3 sâu
+67	Ampelophaga	Sâu sừng / sâu xanh họ bướm trời	Gần giống nhất
+74	Papilio xuthus	Sâu bướm phượng cam/quýt	Khá giống nếu sâu ở cây cam, chanh
+24	army worm	Sâu keo / sâu quân đội	Có thể giống, nhưng thường thân không to mập kiểu sâu sừng
+39	cabbage army worm	Sâu xanh hại cải / sâu keo hại rau	Có thể nhầm
+40	beet army worm	Sâu xanh da láng / sâu keo da láng	Có thể nhầm
+87	Prodenia litura	Sâu khoang	Có thể nhầm, nhưng sâu khoang thường có vằn/hoa văn rõ hơn
+
+dataset_pest
+	Ampelophaga
+	Papilio xuthus
+	army worm
+	cabbage army worm
+	beet army worm
+	Prodenia litura
+
+
+1 train_classifier.py tạo model nhận điện bắp cải
+2 predict_image.py test model nhận điện bấp cải
+
+3  py -m venv .venv
+4  .venv\Scripts\activate
+5 python train_classifier_pest.py
+
+6 tạo file prepare_voc_dataset.py chia ra các tập

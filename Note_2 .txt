@@ -1,0 +1,570 @@
+
+# TỔNG HỢP CÁC BƯỚC VÀ THUẬT TOÁN SỬ DỤNG TRONG HỆ THỐNG PHÁT HIỆN SÂU TRÊN ẢNH
+
+## 1. Tổng quan hệ thống
+
+Hệ thống được xây dựng nhằm phát hiện sâu trên ảnh cây trồng. Mục tiêu không chỉ là nhận diện ảnh thuộc loại sâu nào, mà còn xác định vị trí sâu trên ảnh thông qua bounding box. Để thực hiện bài toán này, hệ thống sử dụng mô hình học sâu MobileNetV2 kết hợp với hồi quy bounding box và các thuật toán xử lý ảnh của OpenCV để tinh chỉnh vùng phát hiện.
+
+Quy trình tổng thể của hệ thống gồm các bước:
+
+```text
+Chuẩn bị dữ liệu ảnh và annotation
+→ Chuyển annotation Pascal VOC XML sang định dạng TXT
+→ Chia dữ liệu thành train, val, test
+→ Train mô hình MobileNetV2 dự đoán class và bounding box
+→ Test ảnh đơn hoặc toàn bộ thư mục ảnh
+→ Tinh chỉnh vùng sâu bằng GrabCut và contour
+→ Lưu ảnh kết quả
+```
+
+---
+
+## 2. Dữ liệu đầu vào
+
+Dữ liệu ban đầu gồm hai thư mục chính:
+
+```text
+dataset_pest_detect/
+├── images/
+│   ├── Ampelophaga/
+│   ├── army worm/
+│   ├── beet army worm/
+│   ├── cabbage army worm/
+│   └── Cabbage_test/
+└── annotations/
+    ├── Ampelophaga/
+    ├── army worm/
+    ├── beet army worm/
+    ├── cabbage army worm/
+    └── Cabbage_test/
+```
+
+Trong đó:
+
+* Thư mục `images/` chứa ảnh sâu.
+* Thư mục `annotations/` chứa file nhãn tương ứng với từng ảnh.
+* Mỗi file annotation có định dạng Pascal VOC XML.
+* Mỗi ảnh có thông tin loại sâu và bounding box bao quanh sâu.
+
+Ví dụ annotation Pascal VOC XML:
+
+```xml
+<annotation>
+    <folder>Ampelophaga</folder>
+    <filename>43884.jpg</filename>
+    <size>
+        <width>253</width>
+        <height>190</height>
+        <depth>3</depth>
+    </size>
+    <object>
+        <name>Ampelophaga</name>
+        <bndbox>
+            <xmin>112</xmin>
+            <ymin>43</ymin>
+            <xmax>137</xmax>
+            <ymax>176</ymax>
+        </bndbox>
+    </object>
+</annotation>
+```
+
+Ý nghĩa của bounding box:
+
+```text
+xmin: tọa độ trái của box
+ymin: tọa độ trên của box
+xmax: tọa độ phải của box
+ymax: tọa độ dưới của box
+```
+
+---
+
+## 3. Chuyển đổi annotation Pascal VOC sang định dạng TXT
+
+Để thuận tiện cho quá trình train, hệ thống chuyển file XML sang file TXT đơn giản.
+
+Định dạng TXT sau chuyển đổi:
+
+```text
+class_id xmin ymin xmax ymax
+```
+
+Ví dụ:
+
+```text
+0 112 43 137 176
+```
+
+Trong đó:
+
+```text
+0 = Ampelophaga
+1 = army worm
+2 = beet army worm
+3 = cabbage army worm
+```
+
+Sau khi chạy file xử lý dữ liệu:
+
+```powershell
+python prepare_voc_dataset.py
+```
+
+hệ thống tạo ra dataset mới:
+
+```text
+dataset_pest_bbox/
+├── images/
+│   ├── train/
+│   ├── val/
+│   └── test/
+├── annotations/
+│   ├── train/
+│   ├── val/
+│   └── test/
+└── classes.txt
+```
+
+File `classes.txt` chứa danh sách class:
+
+```text
+Ampelophaga
+army worm
+beet army worm
+cabbage army worm
+```
+
+---
+
+## 4. Mô hình MobileNetV2
+
+MobileNetV2 được sử dụng làm backbone để trích xuất đặc trưng ảnh. Đây là mô hình CNN nhẹ, phù hợp cho các bài toán nhận diện ảnh cần tốc độ xử lý nhanh và yêu cầu tài nguyên tính toán không quá lớn.
+
+Trong hệ thống, MobileNetV2 không chỉ dùng để phân loại ảnh mà còn được mở rộng để dự đoán bounding box.
+
+Kiến trúc tổng quát:
+
+```text
+Ảnh đầu vào
+→ Resize về 224x224
+→ Tiền xử lý ảnh theo chuẩn MobileNetV2
+→ MobileNetV2 Backbone
+→ Global Average Pooling
+→ Dropout
+→ Nhánh phân loại class
+→ Nhánh dự đoán bounding box
+```
+
+Mô hình có hai đầu ra:
+
+```text
+class_output: dự đoán loại sâu
+box_output: dự đoán vị trí bounding box
+```
+
+---
+
+## 5. Nhánh phân loại class
+
+Nhánh phân loại có nhiệm vụ dự đoán ảnh thuộc loại sâu nào.
+
+Đầu ra của nhánh này là một vector xác suất:
+
+```text
+class_output = [p1, p2, p3, p4]
+```
+
+Ví dụ:
+
+```text
+[0.80, 0.05, 0.10, 0.05]
+```
+
+Kết quả trên có nghĩa là mô hình dự đoán ảnh thuộc class thứ nhất với xác suất cao nhất.
+
+Hàm kích hoạt sử dụng ở nhánh này là:
+
+```text
+Softmax
+```
+
+Softmax giúp chuyển đầu ra của mô hình thành xác suất cho từng class.
+
+---
+
+## 6. Nhánh dự đoán bounding box
+
+Nhánh bounding box có nhiệm vụ dự đoán vị trí sâu trên ảnh.
+
+Đầu ra của nhánh này gồm 4 giá trị:
+
+```text
+box_output = [x_min, y_min, x_max, y_max]
+```
+
+Các giá trị này được chuẩn hóa trong khoảng từ 0 đến 1.
+
+Ví dụ:
+
+```text
+box_output = [0.32, 0.25, 0.70, 0.80]
+```
+
+Để vẽ bounding box lên ảnh gốc, cần chuyển tọa độ chuẩn hóa về tọa độ pixel:
+
+```text
+x1 = x_min × image_width
+y1 = y_min × image_height
+x2 = x_max × image_width
+y2 = y_max × image_height
+```
+
+Ví dụ ảnh có kích thước 640x480:
+
+```text
+x1 = 0.32 × 640
+y1 = 0.25 × 480
+x2 = 0.70 × 640
+y2 = 0.80 × 480
+```
+
+---
+
+## 7. Hàm loss khi train
+
+Do mô hình có hai đầu ra nên quá trình train sử dụng hai hàm loss khác nhau.
+
+### 7.1. Loss cho phân loại
+
+Nhánh phân loại sử dụng:
+
+```text
+Categorical Crossentropy
+```
+
+Hàm loss này đo sai khác giữa class thật và class mô hình dự đoán.
+
+### 7.2. Loss cho bounding box
+
+Nhánh bounding box sử dụng:
+
+```text
+Mean Squared Error
+```
+
+Hàm loss này đo sai khác giữa tọa độ box thật và tọa độ box dự đoán.
+
+### 7.3. Tổng loss
+
+Tổng loss của mô hình được tính theo công thức:
+
+```text
+Loss_total = Loss_class + α × Loss_box
+```
+
+Trong code, hệ số `α` được đặt lớn hơn 1, ví dụ:
+
+```text
+Loss_total = 1.0 × Loss_class + 5.0 × Loss_box
+```
+
+Việc tăng trọng số cho `Loss_box` giúp mô hình chú ý hơn đến việc học vị trí bounding box.
+
+---
+
+## 8. Train mô hình
+
+Sau khi chuẩn bị dữ liệu, tiến hành train bằng lệnh:
+
+```powershell
+python train_bbox_detector.py
+```
+
+File này thực hiện các nhiệm vụ:
+
+```text
+Đọc ảnh train và annotation
+Đọc ảnh validation và annotation
+Load danh sách class
+Build mô hình MobileNetV2
+Compile model với 2 loss
+Train mô hình
+Lưu model tốt nhất
+Lưu model cuối cùng
+```
+
+Kết quả sau khi train được lưu tại:
+
+```text
+runs/pest_bbox_mobilenet/
+├── best_model.keras
+├── final_model.keras
+└── classes.txt
+```
+
+Trong đó:
+
+```text
+best_model.keras: model tốt nhất theo val_loss
+final_model.keras: model sau epoch cuối cùng
+classes.txt: danh sách class dùng khi suy luận
+```
+
+---
+
+## 9. Suy luận trên ảnh đơn
+
+Sau khi train, hệ thống có thể test trên một ảnh bằng file:
+
+```powershell
+python test_image_refine_contour.py
+```
+
+Quy trình suy luận ảnh đơn:
+
+```text
+Đọc ảnh đầu vào
+→ Resize ảnh về 224x224
+→ Load model best_model.keras
+→ Dự đoán class và bounding box
+→ Chuyển box từ tọa độ chuẩn hóa sang pixel
+→ Vẽ bounding box thô
+→ Tinh chỉnh vùng sâu bằng GrabCut
+→ Tìm contour vùng sâu
+→ Vẽ kết quả lên ảnh
+→ Lưu ảnh output
+```
+
+Kết quả ảnh đầu ra gồm:
+
+```text
+Box đỏ: bounding box thô do model dự đoán
+Box xanh: bounding box sau tinh chỉnh
+Đường vàng: contour vùng nghi là sâu
+Tên class và độ tin cậy
+```
+
+---
+
+## 10. Quét toàn bộ thư mục ảnh test
+
+Để kiểm tra nhiều ảnh cùng lúc, sử dụng file:
+
+```powershell
+python test_folder_refine_contour.py
+```
+
+File này quét toàn bộ ảnh trong thư mục:
+
+```text
+dataset_pest_bbox/images/test
+```
+
+Với mỗi ảnh, chương trình thực hiện:
+
+```text
+Đọc ảnh
+→ Dự đoán loại sâu
+→ Dự đoán bounding box
+→ Tinh chỉnh bằng GrabCut
+→ Tìm contour
+→ Vẽ kết quả
+→ Lưu ảnh output
+```
+
+Kết quả được lưu vào:
+
+```text
+outputs_refined_test/
+```
+
+---
+
+## 11. Thuật toán GrabCut
+
+GrabCut là thuật toán xử lý ảnh dùng để tách foreground và background. Trong hệ thống này, bounding box dự đoán từ mô hình được sử dụng làm vùng khởi tạo cho GrabCut.
+
+Ý tưởng:
+
+```text
+Vùng trong bounding box có khả năng chứa sâu
+Vùng ngoài bounding box được xem là nền
+GrabCut phân tách pixel thành foreground và background
+```
+
+Quy trình:
+
+```text
+Ảnh gốc
+→ Bounding box thô
+→ Khởi tạo GrabCut bằng box
+→ Tạo mask foreground/background
+→ Lấy vùng foreground
+→ Tạo mask nhị phân
+```
+
+GrabCut giúp tách vùng sâu khỏi nền tốt hơn, đặc biệt khi con sâu có hình dạng cong hoặc dài.
+
+---
+
+## 12. Thuật toán contour
+
+Sau khi GrabCut tạo ra mask foreground, hệ thống sử dụng thuật toán tìm contour để lấy đường bao quanh vùng nghi là sâu.
+
+Contour là đường viền bao quanh một vùng vật thể trong ảnh nhị phân.
+
+Các bước:
+
+```text
+Tạo mask nhị phân từ GrabCut
+→ Tìm tất cả contour bằng cv2.findContours
+→ Chọn contour có diện tích lớn nhất
+→ Vẽ contour lên ảnh
+→ Tính bounding box mới từ contour
+```
+
+Code tương ứng về mặt ý tưởng:
+
+```text
+contours = findContours(mask)
+largest_contour = contour có diện tích lớn nhất
+refined_box = boundingRect(largest_contour)
+```
+
+Kết quả:
+
+```text
+Contour giúp vùng phát hiện bám sát hình dạng con sâu hơn bounding box chữ nhật.
+```
+
+---
+
+## 13. Xử lý morphology
+
+Mask sau khi tách bằng GrabCut có thể bị nhiễu, có lỗ nhỏ hoặc bị đứt đoạn. Vì vậy hệ thống sử dụng các phép toán hình thái học.
+
+Hai phép toán chính:
+
+```text
+MORPH_OPEN
+MORPH_CLOSE
+```
+
+`MORPH_OPEN` dùng để loại bỏ các vùng nhiễu nhỏ.
+
+`MORPH_CLOSE` dùng để nối các vùng foreground bị đứt nhẹ.
+
+Nhờ đó contour thu được ổn định và mượt hơn.
+
+---
+
+## 14. Lý do không dùng patch inference trong phiên bản hiện tại
+
+Ban đầu có thể dùng phương pháp chia ảnh thành các patch nhỏ rồi phân loại từng patch có sâu hay không. Ý tưởng:
+
+```text
+Đọc ảnh
+→ Chia ảnh thành nhiều ô nhỏ
+→ Đưa từng ô qua model phân loại
+→ Nếu xác suất có sâu cao thì vẽ khung
+```
+
+Tuy nhiên, phương pháp này có hạn chế:
+
+```text
+Chạy chậm vì phải dự đoán nhiều patch
+Box không chính xác
+Dễ bỏ sót sâu nếu patch không phù hợp
+Không học trực tiếp vị trí sâu
+```
+
+Trong phiên bản hiện tại, hệ thống dùng annotation bounding box để train mô hình dự đoán trực tiếp vị trí sâu, do đó phù hợp hơn cho bài toán phát hiện vị trí.
+
+---
+
+## 15. Hạn chế của mô hình hiện tại
+
+Mô hình hiện tại sử dụng MobileNetV2 kết hợp Dense để dự đoán bounding box. Phương pháp này đơn giản và dễ triển khai nhưng vẫn có một số hạn chế:
+
+```text
+Chỉ phù hợp tốt khi mỗi ảnh có một con sâu chính
+Box có thể bị lệch hoặc quá to
+Không phát hiện tốt nhiều sâu trong cùng một ảnh
+Độ chính xác phụ thuộc vào số lượng và chất lượng annotation
+GrabCut chỉ là hậu xử lý, không thay thế được mô hình detection chuyên dụng
+```
+
+Nguyên nhân chính là mô hình sử dụng Global Average Pooling, làm mất một phần thông tin vị trí chi tiết của vật thể.
+
+---
+
+## 16. So sánh với YOLO
+
+YOLO là mô hình object detection chuyên dụng, có khả năng phát hiện nhiều vật thể và nhiều bounding box trong một ảnh. YOLO chia ảnh thành lưới và dự đoán nhiều box cùng lúc.
+
+Trong khi đó, hệ thống hiện tại sử dụng MobileNetV2 và hồi quy bounding box đơn giản.
+
+So sánh:
+
+```text
+MobileNetV2 + Bounding Box Regression:
+- Dễ cài đặt
+- Dễ hiểu
+- Không cần dùng YOLO
+- Phù hợp với ảnh có một đối tượng chính
+- Box có thể chưa thật chính xác
+
+YOLO:
+- Phát hiện nhiều đối tượng tốt hơn
+- Box chính xác hơn
+- Tốc độ cao hơn với video
+- Kiến trúc phức tạp hơn
+```
+
+---
+
+## 17. Tối ưu tốc độ xử lý
+
+Để tăng tốc khi xử lý nhiều ảnh hoặc video, hệ thống có thể áp dụng:
+
+```text
+Giảm kích thước ảnh đầu vào từ 224 xuống 160 hoặc 128
+Giới hạn số luồng CPU TensorFlow sử dụng
+Resize ảnh hoặc frame video trước khi predict
+Không chạy GrabCut nếu chỉ cần box thô
+Predict theo batch khi quét nhiều ảnh
+Với video, chỉ predict mỗi 3 đến 5 frame một lần
+```
+
+Ví dụ giới hạn CPU:
+
+```python
+os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["TF_NUM_INTRAOP_THREADS"] = "4"
+os.environ["TF_NUM_INTEROP_THREADS"] = "2"
+```
+
+---
+
+## 18. Tổng kết phương pháp
+
+Phương pháp đề xuất trong hệ thống là:
+
+```text
+Phát hiện sâu trên ảnh sử dụng MobileNetV2 kết hợp hồi quy bounding box và tinh chỉnh contour bằng GrabCut.
+```
+
+Các bước chính:
+
+```text
+Bước 1: Chuẩn bị dataset ảnh và annotation Pascal VOC
+Bước 2: Chuyển XML sang TXT
+Bước 3: Chia dữ liệu train, val, test
+Bước 4: Train MobileNetV2 với hai đầu ra class và box
+Bước 5: Suy luận ảnh bằng model đã train
+Bước 6: Tinh chỉnh vùng sâu bằng GrabCut
+Bước 7: Tìm contour và vẽ kết quả
+```
+
+Phương pháp này giúp hệ thống vừa nhận diện được loại sâu, vừa xác định được vùng sâu trên ảnh. Mặc dù độ chính xác chưa thể bằng các mô hình object detection chuyên dụng như YOLO, phương pháp vẫn phù hợp với mục tiêu xây dựng một hệ thống đơn giản, dễ hiểu, có thể triển khai trong đồ án tốt nghiệp.
